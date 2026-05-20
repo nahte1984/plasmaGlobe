@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-    <title>Interactive Plasma Globe</title>
+    <title>v2.0.1 | Interactive Plasma Globe</title>
     <style>
         body {
             margin: 0;
@@ -20,43 +20,11 @@
         #video {
             display: none; /* 隱藏實際的影片元素，只將影像傳給 WebGL */
         }
-        #instructions {
-            position: absolute;
-            top: 20px;
-            left: 20px;
-            color: rgba(255, 255, 255, 0.7);
-            pointer-events: none;
-            text-shadow: 0 2px 4px rgba(0,0,0,0.8);
-            z-index: 10;
-        }
-        h1 { margin: 0 0 5px 0; font-size: 24px; font-weight: normal; color: #fff;}
-        p { margin: 0; font-size: 14px; }
-        .permission-btn {
-            pointer-events: auto;
-            margin-top: 10px;
-            padding: 8px 16px;
-            background: rgba(255,255,255,0.2);
-            color: white;
-            border: 1px solid rgba(255,255,255,0.5);
-            border-radius: 4px;
-            cursor: pointer;
-            transition: all 0.3s;
-        }
-        .permission-btn:hover {
-            background: rgba(255,255,255,0.4);
-        }
     </style>
     <!-- 引入 Three.js -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 </head>
 <body>
-
-    <div id="instructions">
-        <h1>電漿球互動裝置</h1>
-        <p>1. 在球體範圍內（90vmin）點擊或滑動，閃電會向指尖聚集。</p>
-        <p>2. 點擊下方按鈕允許相機權限，將你的臉孔反射於球體上。</p>
-        <button class="permission-btn" id="startCamera">啟動前置鏡頭</button>
-    </div>
 
     <!-- 用於獲取相機畫面的隱藏 Video 標籤 -->
     <video id="video" autoplay playsinline muted></video>
@@ -67,7 +35,7 @@
         // === Three.js 初始化設定 ===
         const container = document.getElementById('container');
         const renderer = new THREE.WebGLRenderer({ antialias: true });
-        renderer.setPixelRatio(window.devicePixelRatio);
+        // 移除 setPixelRatio，讓畫布尺寸與 CSS 尺寸 1:1，避免 gl_FragCoord 偏移並提升 Shader 效能
         renderer.setSize(window.innerWidth, window.innerHeight);
         container.appendChild(renderer.domElement);
 
@@ -404,34 +372,30 @@
         window.addEventListener('touchmove', handlePointer, { passive: true });
         window.addEventListener('touchend', handlePointer);
 
-        // === WebRTC 攝影機串接 ===
+        // === WebRTC 攝影機串接 (網頁載入時自動執行) ===
         const video = document.getElementById('video');
-        const btnCamera = document.getElementById('startCamera');
 
-        btnCamera.addEventListener('click', () => {
-            if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
-                navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' } })
-                    .then(stream => {
-                        video.srcObject = stream;
-                        video.play();
-                        
-                        // 建立 Three.js 影片紋理
-                        const videoTexture = new THREE.VideoTexture(video);
-                        videoTexture.minFilter = THREE.LinearFilter;
-                        videoTexture.magFilter = THREE.LinearFilter;
-                        videoTexture.format = THREE.RGBFormat;
-                        
-                        material.uniforms.u_cameraTex.value = videoTexture;
-                        material.uniforms.u_hasCamera.value = 1.0;
-                        btnCamera.style.display = 'none'; // 成功後隱藏按鈕
-                    })
-                    .catch(err => {
-                        alert("無法存取攝影機：" + err.message);
-                    });
-            } else {
-                alert("你的瀏覽器不支援攝影機存取，或需要使用 HTTPS 協定。");
-            }
-        });
+        if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+            navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' } })
+                .then(stream => {
+                    video.srcObject = stream;
+                    video.play();
+                    
+                    // 建立 Three.js 影片紋理
+                    const videoTexture = new THREE.VideoTexture(video);
+                    videoTexture.minFilter = THREE.LinearFilter;
+                    videoTexture.magFilter = THREE.LinearFilter;
+                    videoTexture.format = THREE.RGBFormat;
+                    
+                    material.uniforms.u_cameraTex.value = videoTexture;
+                    material.uniforms.u_hasCamera.value = 1.0;
+                })
+                .catch(err => {
+                    console.warn("無法存取攝影機：" + err.message);
+                });
+        } else {
+            console.warn("你的瀏覽器不支援攝影機存取，或需要使用 HTTPS 協定。");
+        }
 
         // === 動畫與重新計算迴圈 ===
         const clock = new THREE.Clock();
