@@ -1,0 +1,467 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Interactive Plasma Globe</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+            background-color: #050505;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        }
+        canvas {
+            display: block;
+            width: 100vw;
+            height: 100vh;
+        }
+        #video {
+            display: none; /* 隱藏實際的影片元素，只將影像傳給 WebGL */
+        }
+        #instructions {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            color: rgba(255, 255, 255, 0.7);
+            pointer-events: none;
+            text-shadow: 0 2px 4px rgba(0,0,0,0.8);
+            z-index: 10;
+        }
+        h1 { margin: 0 0 5px 0; font-size: 24px; font-weight: normal; color: #fff;}
+        p { margin: 0; font-size: 14px; }
+        .permission-btn {
+            pointer-events: auto;
+            margin-top: 10px;
+            padding: 8px 16px;
+            background: rgba(255,255,255,0.2);
+            color: white;
+            border: 1px solid rgba(255,255,255,0.5);
+            border-radius: 4px;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+        .permission-btn:hover {
+            background: rgba(255,255,255,0.4);
+        }
+    </style>
+    <!-- 引入 Three.js -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+</head>
+<body>
+
+    <div id="instructions">
+        <h1>電漿球互動裝置</h1>
+        <p>1. 在球體範圍內（90vmin）點擊或滑動，閃電會向指尖聚集。</p>
+        <p>2. 點擊下方按鈕允許相機權限，將你的臉孔反射於球體上。</p>
+        <button class="permission-btn" id="startCamera">啟動前置鏡頭</button>
+    </div>
+
+    <!-- 用於獲取相機畫面的隱藏 Video 標籤 -->
+    <video id="video" autoplay playsinline muted></video>
+    
+    <div id="container"></div>
+
+    <script>
+        // === Three.js 初始化設定 ===
+        const container = document.getElementById('container');
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setPixelRatio(window.devicePixelRatio);
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        container.appendChild(renderer.domElement);
+
+        // 使用正交相機（因為我們只是要在整個畫面上畫一個平面的 Shader）
+        const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+        const scene = new THREE.Scene();
+        const geometry = new THREE.PlaneGeometry(2, 2);
+
+        // === GLSL Shader 程式碼 ===
+        const vertexShader = `
+            void main() {
+                gl_Position = vec4(position, 1.0);
+            }
+        `;
+
+        const fragmentShader = `
+            uniform float iTime;
+            uniform vec2 iResolution;
+            uniform vec2 u_mouseRot;       // 閒置時的球體旋轉
+            uniform vec3 u_targetPos;      // 使用者互動的目標 3D 座標
+            uniform float u_interactRatio; // 互動強度 (0.0 ~ 1.0)
+            uniform sampler2D u_cameraTex; // 攝影機紋理
+            uniform float u_hasCamera;     // 是否已開啟攝影機
+
+            #define NUM_RAYS 13.
+            #define VOLUMETRIC_STEPS 19
+            #define MAX_ITER 35
+            #define FAR 6.
+            #define time iTime*1.1
+
+            // 旋轉矩陣
+            mat2 mm2(in float a){float c = cos(a), s = sin(a);return mat2(c,-s,s,c);}
+            
+            // 替換原本的紋理雜訊：純數學 1D 雜訊
+            float hash( float n ){return fract(sin(n)*43758.5453);}
+            float noise1D(float x) {
+                float i = floor(x * 0.01);
+                float f = fract(x * 0.01);
+                f = f * f * (3.0 - 2.0 * f);
+                return mix(hash(i), hash(i + 1.0), f);
+            }
+
+            // 替換原本的紋理雜訊：純數學 3D 雜訊
+            float hash3(vec3 p) {
+                p = fract(p * 0.3183099 + .1);
+                p *= 17.0;
+                return fract(p.x * p.y * p.z * (p.x + p.y + p.z));
+            }
+            float noise3D(in vec3 x) {
+                vec3 p = floor(x);
+                vec3 f = fract(x);
+                f = f * f * (3.0 - 2.0 * f);
+                return mix(mix(mix( hash3(p+vec3(0,0,0)), hash3(p+vec3(1,0,0)),f.x),
+                               mix( hash3(p+vec3(0,1,0)), hash3(p+vec3(1,1,0)),f.x),f.y),
+                           mix(mix( hash3(p+vec3(0,0,1)), hash3(p+vec3(1,0,1)),f.x),
+                               mix( hash3(p+vec3(0,1,1)), hash3(p+vec3(1,1,1)),f.x),f.y),f.z);
+            }
+
+            mat3 m3 = mat3( 0.00,  0.80,  0.60,
+                          -0.80,  0.36, -0.48,
+                          -0.60, -0.48,  0.64 );
+
+            float flow(in vec3 p, in float t) {
+                float z=2.;
+                float rz = 0.;
+                vec3 bp = p;
+                for (float i= 1.;i < 5.;i++ ) {
+                    p += time*.1;
+                    rz+= (sin(noise3D(p+t*0.8)*6.)*0.5+0.5) /z;
+                    p = mix(bp,p,0.6);
+                    z *= 2.;
+                    p *= 2.01;
+                    p*= m3;
+                }
+                return rz;	
+            }
+
+            float sins(in float x) {
+                float rz = 0.;
+                float z = 2.;
+                for (float i= 0.;i < 3.;i++ ) {
+                    rz += abs(fract(x*1.4)-0.5)/z;
+                    x *= 1.3;
+                    z *= 1.15;
+                    x -= time*.65*z;
+                }
+                return rz;
+            }
+
+            float segm( vec3 p, vec3 a, vec3 b) {
+                vec3 pa = p - a;
+                vec3 ba = b - a;
+                float h = clamp( dot(pa,ba)/dot(ba,ba), 0.0, 1. );	
+                return length( pa - ba*h )*.5;
+            }
+
+            // 修改：加入 rayTarget 來控制閃電路徑的聚集
+            vec3 path(in float i, in float d, in vec3 rayTarget) {
+                vec3 en = vec3(0.,0.,1.);
+                float sns2 = sins(d+i*0.5)*0.22;
+                float sns = sins(d+i*.6)*0.21;
+                en.xz *= mm2((hash(i*10.569)-.5)*6.2+sns2);
+                en.xy *= mm2((hash(i*4.732)-.5)*6.2+sns);
+                
+                // 【互動邏輯】越靠近外圍 (d越大) 越容易受到使用者指尖 (rayTarget) 的吸引
+                float pull = smoothstep(0.0, 0.8, d) * u_interactRatio;
+                // 混合原本隨機路徑與目標座標 (0.85 確保保留一點閃電的隨機扭曲感)
+                en = normalize(mix(en, rayTarget, pull * 0.85));
+                return en;
+            }
+
+            vec2 map(vec3 p, float i, vec3 rayTarget) {
+                float lp = length(p);
+                vec3 bg = vec3(0.);   
+                vec3 en = path(i, lp, rayTarget);
+                
+                float ins = smoothstep(0.11,.46,lp);
+                float outs = .15+smoothstep(.0,.15,abs(lp-1.));
+                p *= ins*outs;
+                float id = ins*outs;
+                
+                float rz = segm(p, bg, en)-0.011;
+                return vec2(rz,id);
+            }
+
+            float march(in vec3 ro, in vec3 rd, in float startf, in float maxd, in float j, vec3 rayTarget) {
+                float precis = 0.001;
+                float h=0.5;
+                float d = startf;
+                for( int i=0; i<MAX_ITER; i++ ) {
+                    if( abs(h)<precis||d>maxd ) break;
+                    d += h*1.2;
+                    float res = map(ro+rd*d, j, rayTarget).x;
+                    h = res;
+                }
+                return d;
+            }
+
+            vec3 vmarch(in vec3 ro, in vec3 rd, in float j, in vec3 orig, vec3 rayTarget) {   
+                vec3 p = ro;
+                vec2 r = vec2(0.);
+                vec3 sum = vec3(0);
+                float w = 0.;
+                for( int i=0; i<VOLUMETRIC_STEPS; i++ ) {
+                    r = map(p, j, rayTarget);
+                    p += rd*.03;
+                    float lp = length(p);
+                    
+                    vec3 col = sin(vec3(1.05,2.5,1.52)*3.94+r.y)*.85+0.4;
+                    col.rgb *= smoothstep(.0,.015,-r.x);
+                    col *= smoothstep(0.04,.2,abs(lp-1.1));
+                    col *= smoothstep(0.1,.34,lp);
+                    // 使用數學雜訊替換 texture
+                    sum += abs(col)*5. * (1.2-noise1D(lp*2.+j*13.+time*5.)*1.1) / (log(distance(p,orig)-2.)+.75);
+                }
+                return sum;
+            }
+
+            vec2 iSphere2(in vec3 ro, in vec3 rd) {
+                vec3 oc = ro;
+                float b = dot(oc, rd);
+                float c = dot(oc,oc) - 1.;
+                float h = b*b - c;
+                if(h <0.0) return vec2(-1.);
+                else return vec2((-b - sqrt(h)), (-b + sqrt(h)));
+            }
+
+            void main() {	
+                // 將座標正規化，保證短邊比例一致。0.68 係數用來確保球體直徑精準對應螢幕 90vmin
+                vec2 p = (gl_FragCoord.xy - 0.5 * iResolution.xy) / min(iResolution.x, iResolution.y);
+                vec3 rd = normalize(vec3(p * 0.68, -1.5)); 
+                vec3 ro = vec3(0.,0.,5.);
+                
+                // 背景旋轉矩陣 (由滑鼠或閒置狀態控制)
+                mat2 mx = mm2(time*.4+u_mouseRot.x*6.);
+                mat2 my = mm2(time*0.3+u_mouseRot.y*6.); 
+                ro.xz *= mx; rd.xz *= mx;
+                ro.xy *= my; rd.xy *= my;
+                
+                // 處理使用者的互動目標點 (確保目標點隨著球體座標系正確轉換)
+                vec3 tPos = u_targetPos;
+                tPos.xz *= mx;
+                tPos.xy *= my;
+
+                vec3 bro = ro;
+                vec3 brd = rd;
+                
+                vec3 col = vec3(0.0125,0.,0.025);
+                
+                // 畫出所有閃電
+                for (float j = 1.;j<NUM_RAYS+1.;j++) {
+                    ro = bro;
+                    rd = brd;
+                    // 單根閃電的獨立偏移旋轉
+                    mat2 mm = mm2((time*0.1+((j+1.)*5.1))*j*0.25);
+                    ro.xy *= mm; rd.xy *= mm;
+                    ro.xz *= mm; rd.xz *= mm;
+                    
+                    // 目標點也必須套用一樣的偏移，閃電才不會因為旋轉而找錯方向
+                    vec3 rayTarget = tPos;
+                    rayTarget.xy *= mm;
+                    rayTarget.xz *= mm;
+
+                    float rz = march(ro,rd,2.5,FAR,j, rayTarget);
+                    if ( rz >= FAR) continue;
+                    vec3 pos = ro+rz*rd;
+                    col = max(col,vmarch(pos,rd,j, bro, rayTarget));
+                }
+                
+                ro = bro;
+                rd = brd;
+                // 檢查是否打中玻璃球體
+                vec2 sph = iSphere2(ro,rd);
+                
+                if (sph.x > 0.) {
+                    vec3 pos = ro+rd*sph.x;
+                    vec3 pos2 = ro+rd*sph.y;
+                    vec3 rf = reflect( rd, pos );
+                    vec3 rf2 = reflect( rd, pos2 );
+                    float nz = (-log(abs(flow(rf*1.2,time)-.01)));
+                    float nz2 = (-log(abs(flow(rf2*1.2,-time)-.01)));
+                    
+                    // 電漿球本身的玻璃反光疊加
+                    col += (0.1*nz*nz* vec3(0.12,0.12,.5) + 0.05*nz2*nz2*vec3(0.55,0.2,.55))*0.8;
+                    
+                    // 【攝影機影像疊加 - 扭曲模糊版】
+                    if (u_hasCamera > 0.5) {
+                        // 取得未旋轉前的球體表面法線，製造真實的球體包裹感（球面扭曲）
+                        vec3 unrotated_pos = vec3(0., 0., 5.) + normalize(vec3(p * 0.68, -1.5)) * sph.x;
+                        vec3 n = normalize(unrotated_pos);
+                        
+                        // 利用法線 n.xy 產生邊緣拉伸的球面 UV
+                        vec2 baseUV = n.xy * 0.5 + 0.5;
+                        baseUV.x = 1.0 - baseUV.x; // 鏡像翻轉
+                        
+                        // 加上電漿雜訊產生的水波扭曲
+                        baseUV += rf.xy * 0.03 * nz;
+                        
+                        // 進行多點採樣來產生模糊效果 (Blur)
+                        float blur = 0.015;
+                        vec3 camTexCol = vec3(0.0);
+                        camTexCol += texture2D(u_cameraTex, baseUV + vec2(-blur, -blur)).rgb;
+                        camTexCol += texture2D(u_cameraTex, baseUV + vec2( blur, -blur)).rgb;
+                        camTexCol += texture2D(u_cameraTex, baseUV + vec2(-blur,  blur)).rgb;
+                        camTexCol += texture2D(u_cameraTex, baseUV + vec2( blur,  blur)).rgb;
+                        camTexCol += texture2D(u_cameraTex, baseUV).rgb * 2.0;
+                        camTexCol /= 6.0;
+
+                        // 1. 轉換為黑白 (Luminance)
+                        float gray = dot(camTexCol, vec3(0.299, 0.587, 0.114));
+
+                        // 2. 超高對比度處理，只保留最亮的輪廓
+                        gray = (gray - 0.5) * 4.5 + 0.5;
+                        gray = smoothstep(0.3, 0.8, gray); // 壓暗黑部，營造幽微感
+                        gray = clamp(gray, 0.0, 1.0);
+
+                        vec3 finalCamCol = vec3(gray);
+
+                        // 3. 調整透明度為 5% (0.05) 並疊加
+                        vec3 glassTint = vec3(0.6, 0.8, 1.0); 
+                        col += finalCamCol * glassTint * 0.05;
+                    }
+                }
+                
+                gl_FragColor = vec4(col*1.3, 1.0);
+            }
+        `;
+
+        const material = new THREE.ShaderMaterial({
+            vertexShader,
+            fragmentShader,
+            uniforms: {
+                iTime: { value: 0 },
+                iResolution: { value: new THREE.Vector2(window.innerWidth, window.innerHeight) },
+                u_mouseRot: { value: new THREE.Vector2(0, 0) },
+                u_targetPos: { value: new THREE.Vector3(0, 0, 1) },
+                u_interactRatio: { value: 0 },
+                u_cameraTex: { value: null },
+                u_hasCamera: { value: 0 }
+            }
+        });
+
+        const mesh = new THREE.Mesh(geometry, material);
+        scene.add(mesh);
+
+        // === 互動邏輯 (滑鼠與觸控) ===
+        let isTouching = false;
+        let targetX = 0, targetY = 0; // -1 到 1 的正規化座標
+        let currentInteractRatio = 0;
+        let mouseRotX = 0, mouseRotY = 0;
+
+        function handlePointer(e) {
+            let cx = e.clientX;
+            let cy = e.clientY;
+            if (e.touches && e.touches.length > 0) {
+                cx = e.touches[0].clientX;
+                cy = e.touches[0].clientY;
+            }
+
+            const w = window.innerWidth;
+            const h = window.innerHeight;
+            // 定義感應範圍為 90vmin (即半徑為 45vmin)
+            const radius = Math.min(w, h) * 0.45;
+            const dx = cx - w / 2;
+            const dy = cy - h / 2;
+            const dist = Math.hypot(dx, dy);
+
+            // 判斷是否按下且位於球體範圍內
+            if (e.type === 'mousedown' || e.type === 'touchstart') {
+                if (dist <= radius) isTouching = true;
+            }
+
+            if (isTouching && (e.type === 'mousemove' || e.type === 'touchmove')) {
+                // 如果滑動超出球體邊界，將目標座標限制在邊界上
+                const r = Math.min(dist, radius);
+                const angle = Math.atan2(dy, dx);
+                targetX = (Math.cos(angle) * r) / radius;
+                targetY = -(Math.sin(angle) * r) / radius; // WebGL Y軸朝上，需反轉
+            } else if (!isTouching) {
+                // 沒觸碰球體時，讓滑鼠位置控制球體的環境旋轉
+                mouseRotX = (cx / w - 0.5) * 1.5;
+                mouseRotY = -(cy / h - 0.5) * 1.5;
+            }
+
+            if (e.type === 'mouseup' || e.type === 'touchend' || e.type === 'touchcancel') {
+                isTouching = false;
+            }
+        }
+
+        window.addEventListener('mousedown', handlePointer);
+        window.addEventListener('mousemove', handlePointer);
+        window.addEventListener('mouseup', handlePointer);
+        window.addEventListener('touchstart', handlePointer, { passive: true });
+        window.addEventListener('touchmove', handlePointer, { passive: true });
+        window.addEventListener('touchend', handlePointer);
+
+        // === WebRTC 攝影機串接 ===
+        const video = document.getElementById('video');
+        const btnCamera = document.getElementById('startCamera');
+
+        btnCamera.addEventListener('click', () => {
+            if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+                navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' } })
+                    .then(stream => {
+                        video.srcObject = stream;
+                        video.play();
+                        
+                        // 建立 Three.js 影片紋理
+                        const videoTexture = new THREE.VideoTexture(video);
+                        videoTexture.minFilter = THREE.LinearFilter;
+                        videoTexture.magFilter = THREE.LinearFilter;
+                        videoTexture.format = THREE.RGBFormat;
+                        
+                        material.uniforms.u_cameraTex.value = videoTexture;
+                        material.uniforms.u_hasCamera.value = 1.0;
+                        btnCamera.style.display = 'none'; // 成功後隱藏按鈕
+                    })
+                    .catch(err => {
+                        alert("無法存取攝影機：" + err.message);
+                    });
+            } else {
+                alert("你的瀏覽器不支援攝影機存取，或需要使用 HTTPS 協定。");
+            }
+        });
+
+        // === 動畫與重新計算迴圈 ===
+        const clock = new THREE.Clock();
+
+        function animate() {
+            requestAnimationFrame(animate);
+
+            // 平滑過渡互動強度 (Ease-in / Ease-out)
+            const targetRatio = isTouching ? 1.0 : 0.0;
+            currentInteractRatio += (targetRatio - currentInteractRatio) * 0.08;
+            material.uniforms.u_interactRatio.value = currentInteractRatio;
+
+            // 根據 2D 目標座標推算球體表面上的 Z 軸座標 (畢氏定理)
+            const z2 = 1.0 - targetX * targetX - targetY * targetY;
+            const targetZ = z2 > 0 ? Math.sqrt(z2) : 0;
+            material.uniforms.u_targetPos.value.set(targetX, targetY, targetZ);
+            
+            material.uniforms.u_mouseRot.value.set(mouseRotX, mouseRotY);
+            material.uniforms.iTime.value = clock.getElapsedTime();
+
+            renderer.render(scene, camera);
+        }
+
+        // === 響應式視窗調整 ===
+        window.addEventListener('resize', () => {
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            material.uniforms.iResolution.value.set(window.innerWidth, window.innerHeight);
+        });
+
+        animate();
+    </script>
+</body>
+</html>
