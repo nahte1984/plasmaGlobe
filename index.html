@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-    <title>v2.1.1 | Interactive Plasma Globe</title>
+    <title>v2.2 | Interactive Plasma Globe</title>
     <style>
         body {
             margin: 0;
@@ -250,9 +250,10 @@
                     
                     // 【新增：動態暗紫光暈】
                     // 根據光線距離閃電的最短距離，計算光暈強度。距離越近，glow 越大。
-                    float glow = exp(-max(min_dist, 0.0) * 1.8) * 0.06;
+                    // 修改：放寬光暈範圍並稍微增強顏色，讓背景產生反射閃電動態的暗紫色環境光
+                    float glow = exp(-max(min_dist, 0.0) * 1.0) * 0.08;
                     // 將暗紫色光暈疊加到畫面中 (包含球體外的背景)
-                    col += vec3(0.04, 0.01, 0.12) * glow; 
+                    col += vec3(0.07, 0.02, 0.20) * glow; 
 
                     if ( rz >= FAR) continue;
                     vec3 pos = ro+rz*rd;
@@ -295,17 +296,14 @@
                         // 1. 取得原始黑白亮度
                         float rawGray = dot(camTexCol, vec3(0.299, 0.587, 0.114));
                         
-                        // 2. 將黑白與原始色彩混合，保留 35% 彩度
-                        vec3 color35 = mix(vec3(rawGray), camTexCol, 0.31);
-
-                        // 3. 超高對比度處理
-                        vec3 highContrast = (color35 - 0.5) * 4.5 + 0.5;
+                        // 2. 超高對比度處理 (純黑白)
+                        vec3 highContrast = vec3((rawGray - 0.5) * 4.5 + 0.5);
                         highContrast = smoothstep(0.3, 0.8, highContrast); 
                         highContrast = clamp(highContrast, 0.0, 1.0);
 
-                        // 4. 【修改：調整透明度為 15% (0.15) 並疊加】
+                        // 3. 【修改：純黑白畫面，調整透明度為 7.5% (0.075) 並疊加】
                         vec3 glassTint = vec3(0.6, 0.8, 1.0); 
-                        col += highContrast * glassTint * 0.075;
+                        col += highContrast * glassTint * 0.05;
                     }
                 }
                 
