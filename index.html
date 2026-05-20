@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-    <title>v2.0.2 | Interactive Plasma Globe</title>
+    <title>v2.1 | Interactive Plasma Globe</title>
     <style>
         body {
             margin: 0;
@@ -43,11 +43,11 @@
         // === Three.js 初始化設定 ===
         const container = document.getElementById('container');
         const renderer = new THREE.WebGLRenderer({ antialias: true });
-        // 移除 setPixelRatio，讓畫布尺寸與 CSS 尺寸 1:1，避免 gl_FragCoord 偏移並提升 Shader 效能
+        // 保持 1:1 像素比例以確保 Shader 座標精準置中，避免 devicePixelRatio 造成偏移
         renderer.setSize(window.innerWidth, window.innerHeight);
         container.appendChild(renderer.domElement);
 
-        // 使用正交相機（因為我們只是要在整個畫面上畫一個平面的 Shader）
+        // 使用正交相機
         const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
         const scene = new THREE.Scene();
         const geometry = new THREE.PlaneGeometry(2, 2);
@@ -77,7 +77,7 @@
             // 旋轉矩陣
             mat2 mm2(in float a){float c = cos(a), s = sin(a);return mat2(c,-s,s,c);}
             
-            // 替換原本的紋理雜訊：純數學 1D 雜訊
+            // 純數學 1D 雜訊
             float hash( float n ){return fract(sin(n)*43758.5453);}
             float noise1D(float x) {
                 float i = floor(x * 0.01);
@@ -86,7 +86,7 @@
                 return mix(hash(i), hash(i + 1.0), f);
             }
 
-            // 替換原本的紋理雜訊：純數學 3D 雜訊
+            // 純數學 3D 雜訊
             float hash3(vec3 p) {
                 p = fract(p * 0.3183099 + .1);
                 p *= 17.0;
@@ -140,7 +140,6 @@
                 return length( pa - ba*h )*.5;
             }
 
-            // 修改：加入 rayTarget 來控制閃電路徑的聚集
             vec3 path(in float i, in float d, in vec3 rayTarget) {
                 vec3 en = vec3(0.,0.,1.);
                 float sns2 = sins(d+i*0.5)*0.22;
@@ -148,9 +147,8 @@
                 en.xz *= mm2((hash(i*10.569)-.5)*6.2+sns2);
                 en.xy *= mm2((hash(i*4.732)-.5)*6.2+sns);
                 
-                // 【互動邏輯】越靠近外圍 (d越大) 越容易受到使用者指尖 (rayTarget) 的吸引
+                // 互動邏輯：吸引閃電
                 float pull = smoothstep(0.0, 0.8, d) * u_interactRatio;
-                // 混合原本隨機路徑與目標座標 (0.85 確保保留一點閃電的隨機扭曲感)
                 en = normalize(mix(en, rayTarget, pull * 0.85));
                 return en;
             }
@@ -169,15 +167,19 @@
                 return vec2(rz,id);
             }
 
-            float march(in vec3 ro, in vec3 rd, in float startf, in float maxd, in float j, vec3 rayTarget) {
+            // 修改的 march 函數：新增 min_dist 用來記錄視線距離閃電的最短距離
+            float march(in vec3 ro, in vec3 rd, in float startf, in float maxd, in float j, vec3 rayTarget, out float min_dist) {
                 float precis = 0.001;
                 float h=0.5;
                 float d = startf;
+                min_dist = 1000.0; // 初始化為一個很大的數
                 for( int i=0; i<MAX_ITER; i++ ) {
                     if( abs(h)<precis||d>maxd ) break;
                     d += h*1.2;
                     float res = map(ro+rd*d, j, rayTarget).x;
                     h = res;
+                    // 隨時更新最近距離
+                    if(h < min_dist) min_dist = h;
                 }
                 return d;
             }
@@ -196,7 +198,6 @@
                     col.rgb *= smoothstep(.0,.015,-r.x);
                     col *= smoothstep(0.04,.2,abs(lp-1.1));
                     col *= smoothstep(0.1,.34,lp);
-                    // 使用數學雜訊替換 texture
                     sum += abs(col)*5. * (1.2-noise1D(lp*2.+j*13.+time*5.)*1.1) / (log(distance(p,orig)-2.)+.75);
                 }
                 return sum;
@@ -212,18 +213,15 @@
             }
 
             void main() {	
-                // 將座標正規化，保證短邊比例一致。0.68 係數用來確保球體直徑精準對應螢幕 90vmin
                 vec2 p = (gl_FragCoord.xy - 0.5 * iResolution.xy) / min(iResolution.x, iResolution.y);
                 vec3 rd = normalize(vec3(p * 0.68, -1.5)); 
                 vec3 ro = vec3(0.,0.,5.);
                 
-                // 背景旋轉矩陣 (由滑鼠或閒置狀態控制)
                 mat2 mx = mm2(time*.4+u_mouseRot.x*6.);
                 mat2 my = mm2(time*0.3+u_mouseRot.y*6.); 
                 ro.xz *= mx; rd.xz *= mx;
                 ro.xy *= my; rd.xy *= my;
                 
-                // 處理使用者的互動目標點 (確保目標點隨著球體座標系正確轉換)
                 vec3 tPos = u_targetPos;
                 tPos.xz *= mx;
                 tPos.xy *= my;
@@ -231,23 +229,31 @@
                 vec3 bro = ro;
                 vec3 brd = rd;
                 
+                // 基礎背景色
                 vec3 col = vec3(0.0125,0.,0.025);
                 
-                // 畫出所有閃電
+                // 畫出所有閃電，並計算背景光暈
                 for (float j = 1.;j<NUM_RAYS+1.;j++) {
                     ro = bro;
                     rd = brd;
-                    // 單根閃電的獨立偏移旋轉
                     mat2 mm = mm2((time*0.1+((j+1.)*5.1))*j*0.25);
                     ro.xy *= mm; rd.xy *= mm;
                     ro.xz *= mm; rd.xz *= mm;
                     
-                    // 目標點也必須套用一樣的偏移，閃電才不會因為旋轉而找錯方向
                     vec3 rayTarget = tPos;
                     rayTarget.xy *= mm;
                     rayTarget.xz *= mm;
 
-                    float rz = march(ro,rd,2.5,FAR,j, rayTarget);
+                    float min_dist = 0.0;
+                    // 將 min_dist 傳入以獲得最短距離
+                    float rz = march(ro,rd,2.5,FAR,j, rayTarget, min_dist);
+                    
+                    // 【新增：動態暗紫光暈】
+                    // 根據光線距離閃電的最短距離，計算光暈強度。距離越近，glow 越大。
+                    float glow = exp(-max(min_dist, 0.0) * 1.8) * 0.06;
+                    // 將暗紫色光暈疊加到畫面中 (包含球體外的背景)
+                    col += vec3(0.04, 0.01, 0.12) * glow; 
+
                     if ( rz >= FAR) continue;
                     vec3 pos = ro+rz*rd;
                     col = max(col,vmarch(pos,rd,j, bro, rayTarget));
@@ -255,7 +261,6 @@
                 
                 ro = bro;
                 rd = brd;
-                // 檢查是否打中玻璃球體
                 vec2 sph = iSphere2(ro,rd);
                 
                 if (sph.x > 0.) {
@@ -266,23 +271,18 @@
                     float nz = (-log(abs(flow(rf*1.2,time)-.01)));
                     float nz2 = (-log(abs(flow(rf2*1.2,-time)-.01)));
                     
-                    // 電漿球本身的玻璃反光疊加
                     col += (0.1*nz*nz* vec3(0.12,0.12,.5) + 0.05*nz2*nz2*vec3(0.55,0.2,.55))*0.8;
                     
-                    // 【攝影機影像疊加 - 扭曲模糊版】
+                    // 【攝影機影像疊加】
                     if (u_hasCamera > 0.5) {
-                        // 取得未旋轉前的球體表面法線，製造真實的球體包裹感（球面扭曲）
                         vec3 unrotated_pos = vec3(0., 0., 5.) + normalize(vec3(p * 0.68, -1.5)) * sph.x;
                         vec3 n = normalize(unrotated_pos);
                         
-                        // 利用法線 n.xy 產生邊緣拉伸的球面 UV
                         vec2 baseUV = n.xy * 0.5 + 0.5;
-                        baseUV.x = 1.0 - baseUV.x; // 鏡像翻轉
+                        baseUV.x = 1.0 - baseUV.x; 
                         
-                        // 加上電漿雜訊產生的水波扭曲
                         baseUV += rf.xy * 0.03 * nz;
                         
-                        // 進行多點採樣來產生模糊效果 (Blur)
                         float blur = 0.015;
                         vec3 camTexCol = vec3(0.0);
                         camTexCol += texture2D(u_cameraTex, baseUV + vec2(-blur, -blur)).rgb;
@@ -292,21 +292,20 @@
                         camTexCol += texture2D(u_cameraTex, baseUV).rgb * 2.0;
                         camTexCol /= 6.0;
 
-                        // 1. 取得原始黑白亮度 (Luminance)
+                        // 1. 取得原始黑白亮度
                         float rawGray = dot(camTexCol, vec3(0.299, 0.587, 0.114));
                         
-                        // 2. 將黑白與原始色彩混合，取得 35% 的彩度 (0.35)
-                        vec3 color35 = mix(vec3(rawGray), camTexCol, 0.35);
+                        // 2. 將黑白與原始色彩混合，保留 35% 彩度
+                        vec3 color35 = mix(vec3(rawGray), camTexCol, 0.31);
 
-                        // 3. 超高對比度處理，只保留最亮的輪廓
+                        // 3. 超高對比度處理
                         vec3 highContrast = (color35 - 0.5) * 4.5 + 0.5;
-                        highContrast = smoothstep(0.3, 0.8, highContrast); // 壓暗黑部，營造幽微感
+                        highContrast = smoothstep(0.3, 0.8, highContrast); 
                         highContrast = clamp(highContrast, 0.0, 1.0);
 
-                        // 4. 調整透明度為 5% (0.05) 並疊加
-                        // 稍微減弱之前的藍色玻璃濾鏡，讓膚色/原色能自然透出
-                        vec3 glassTint = vec3(0.85, 0.9, 1.0); 
-                        col += highContrast * glassTint * 0.05;
+                        // 4. 【修改：調整透明度為 15% (0.15) 並疊加】
+                        vec3 glassTint = vec3(0.6, 0.8, 1.0); 
+                        col += highContrast * glassTint * 0.75;
                     }
                 }
                 
@@ -333,7 +332,7 @@
 
         // === 互動邏輯 (滑鼠與觸控) ===
         let isTouching = false;
-        let targetX = 0, targetY = 0; // -1 到 1 的正規化座標
+        let targetX = 0, targetY = 0; 
         let currentInteractRatio = 0;
         let mouseRotX = 0, mouseRotY = 0;
 
@@ -347,25 +346,21 @@
 
             const w = window.innerWidth;
             const h = window.innerHeight;
-            // 定義感應範圍為 90vmin (即半徑為 45vmin)
             const radius = Math.min(w, h) * 0.45;
             const dx = cx - w / 2;
             const dy = cy - h / 2;
             const dist = Math.hypot(dx, dy);
 
-            // 判斷是否按下且位於球體範圍內
             if (e.type === 'mousedown' || e.type === 'touchstart') {
                 if (dist <= radius) isTouching = true;
             }
 
             if (isTouching && (e.type === 'mousemove' || e.type === 'touchmove')) {
-                // 如果滑動超出球體邊界，將目標座標限制在邊界上
                 const r = Math.min(dist, radius);
                 const angle = Math.atan2(dy, dx);
                 targetX = (Math.cos(angle) * r) / radius;
-                targetY = -(Math.sin(angle) * r) / radius; // WebGL Y軸朝上，需反轉
+                targetY = -(Math.sin(angle) * r) / radius; 
             } else if (!isTouching) {
-                // 沒觸碰球體時，讓滑鼠位置控制球體的環境旋轉
                 mouseRotX = (cx / w - 0.5) * 1.5;
                 mouseRotY = -(cy / h - 0.5) * 1.5;
             }
@@ -391,7 +386,6 @@
                     video.srcObject = stream;
                     video.play();
                     
-                    // 建立 Three.js 影片紋理
                     const videoTexture = new THREE.VideoTexture(video);
                     videoTexture.minFilter = THREE.LinearFilter;
                     videoTexture.magFilter = THREE.LinearFilter;
@@ -413,12 +407,10 @@
         function animate() {
             requestAnimationFrame(animate);
 
-            // 平滑過渡互動強度 (Ease-in / Ease-out)
             const targetRatio = isTouching ? 1.0 : 0.0;
             currentInteractRatio += (targetRatio - currentInteractRatio) * 0.08;
             material.uniforms.u_interactRatio.value = currentInteractRatio;
 
-            // 根據 2D 目標座標推算球體表面上的 Z 軸座標 (畢氏定理)
             const z2 = 1.0 - targetX * targetX - targetY * targetY;
             const targetZ = z2 > 0 ? Math.sqrt(z2) : 0;
             material.uniforms.u_targetPos.value.set(targetX, targetY, targetZ);
@@ -429,7 +421,6 @@
             renderer.render(scene, camera);
         }
 
-        // === 響應式視窗調整 ===
         window.addEventListener('resize', () => {
             renderer.setSize(window.innerWidth, window.innerHeight);
             material.uniforms.iResolution.value.set(window.innerWidth, window.innerHeight);
