@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-    <title>v2.3.0 | Interactive Plasma Globe</title>
+    <title>v2.4.0 | Interactive Plasma Globe</title>
     <style>
         body {
             margin: 0;
@@ -303,9 +303,9 @@
                         // 讓暗部(小於 0.15)變黑，亮部(大於 0.85)變白，但中間保留非常滑順的灰階過渡
                         float softGray = smoothstep(0.15, 0.85, rawGray);
 
-                        // 5. 【純黑白畫面，維持透明度 5% (0.05) 疊加】
+                        // 5. 【純黑白畫面，維持透明度 7.5% (0.075) 疊加】
                         vec3 glassTint = vec3(0.6, 0.8, 1.0); 
-                        col += vec3(softGray) * glassTint * 0.05;
+                        col += vec3(softGray) * glassTint * 0.06;
                     }
                 }
                 
@@ -332,17 +332,31 @@
 
         // === 互動邏輯 (滑鼠與觸控) ===
         let isTouching = false;
-        let targetX = 0, targetY = 0; 
+        let targetX = 0, targetY = 0; // -1 到 1 的正規化座標
         let currentInteractRatio = 0;
         let mouseRotX = 0, mouseRotY = 0;
 
         function handlePointer(e) {
-            let cx = e.clientX;
-            let cy = e.clientY;
-            if (e.touches && e.touches.length > 0) {
-                cx = e.touches[0].clientX;
-                cy = e.touches[0].clientY;
+            let cx, cy;
+            
+            // 安全獲取游標或觸控座標
+            if (e.type.includes('touch')) {
+                // 觸控事件：若是 touchend，touches 會是空的，需改用 changedTouches
+                if (e.touches && e.touches.length > 0) {
+                    cx = e.touches[0].clientX;
+                    cy = e.touches[0].clientY;
+                } else if (e.changedTouches && e.changedTouches.length > 0) {
+                    cx = e.changedTouches[0].clientX;
+                    cy = e.changedTouches[0].clientY;
+                }
+            } else {
+                // 一般滑鼠事件
+                cx = e.clientX;
+                cy = e.clientY;
             }
+
+            // 防呆機制：如果因為某些原因沒抓到座標，立刻中斷，避免產生 NaN 讓 WebGL 黑屏崩潰
+            if (cx === undefined || cy === undefined) return;
 
             const w = window.innerWidth;
             const h = window.innerHeight;
