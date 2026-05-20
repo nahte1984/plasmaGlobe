@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-    <title>v2.2 | Interactive Plasma Globe</title>
+    <title>v2.3.0 | Interactive Plasma Globe</title>
     <style>
         body {
             margin: 0;
@@ -282,28 +282,30 @@
                         vec2 baseUV = n.xy * 0.5 + 0.5;
                         baseUV.x = 1.0 - baseUV.x; 
                         
-                        baseUV += rf.xy * 0.03 * nz;
+                        // 1. 降低水波扭曲的強度，避免畫面邊緣撕裂感太重
+                        baseUV += rf.xy * 0.01 * nz;
                         
-                        float blur = 0.015;
+                        // 2. 縮小模糊取樣範圍 (由 0.015 降至 0.003)，解決「疊影」問題
+                        // 並且增加原始中心點的權重，讓畫面是「柔焦」而不是「殘影」
+                        float blur = 0.003;
                         vec3 camTexCol = vec3(0.0);
                         camTexCol += texture2D(u_cameraTex, baseUV + vec2(-blur, -blur)).rgb;
                         camTexCol += texture2D(u_cameraTex, baseUV + vec2( blur, -blur)).rgb;
                         camTexCol += texture2D(u_cameraTex, baseUV + vec2(-blur,  blur)).rgb;
                         camTexCol += texture2D(u_cameraTex, baseUV + vec2( blur,  blur)).rgb;
-                        camTexCol += texture2D(u_cameraTex, baseUV).rgb * 2.0;
-                        camTexCol /= 6.0;
+                        camTexCol += texture2D(u_cameraTex, baseUV).rgb * 4.0;
+                        camTexCol /= 8.0;
 
-                        // 1. 取得原始黑白亮度
+                        // 3. 取得原始黑白亮度
                         float rawGray = dot(camTexCol, vec3(0.299, 0.587, 0.114));
                         
-                        // 2. 超高對比度處理 (純黑白)
-                        vec3 highContrast = vec3((rawGray - 0.5) * 4.5 + 0.5);
-                        highContrast = smoothstep(0.3, 0.8, highContrast); 
-                        highContrast = clamp(highContrast, 0.0, 1.0);
+                        // 4. 改用平滑的柔和對比度 (Smoothstep) 取代原本粗暴的乘法
+                        // 讓暗部(小於 0.15)變黑，亮部(大於 0.85)變白，但中間保留非常滑順的灰階過渡
+                        float softGray = smoothstep(0.15, 0.85, rawGray);
 
-                        // 3. 【修改：純黑白畫面，調整透明度為 7.5% (0.075) 並疊加】
+                        // 5. 【純黑白畫面，維持透明度 5% (0.05) 疊加】
                         vec3 glassTint = vec3(0.6, 0.8, 1.0); 
-                        col += highContrast * glassTint * 0.05;
+                        col += vec3(softGray) * glassTint * 0.05;
                     }
                 }
                 
